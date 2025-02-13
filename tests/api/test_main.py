@@ -37,7 +37,8 @@ def client(engine):
         incidents = session.execute(
             text("SELECT description FROM incidents")
         ).fetchall()
-        documents = [inc[0] for inc in incidents]
+        # Преобразуем строки в правильный формат для RAGRetriever
+        documents = [{"content": inc[0]} for inc in incidents]
         if not documents:
             # Insert at least one test document with required fields
             session.execute(
@@ -46,7 +47,7 @@ def client(engine):
                 )
             )
             session.commit()
-            documents = ["Test network incident"]
+            documents = [{"content": "Test network incident"}]
 
         app.state.retriever.index_documents(documents)
 
@@ -63,4 +64,8 @@ def test_health_check(client):
 def test_query_endpoint(client):
     response = client.post("/query", json={"text": "Show all incidents"})
     assert response.status_code == 200
-    assert "results" in response.json()
+    response_data = response.json()
+    assert "status" in response_data
+    assert "data" in response_data
+    assert "results" in response_data["data"]
+    assert isinstance(response_data["data"]["results"], list)

@@ -21,7 +21,7 @@
 
 1. Клонируйте репозиторий:
 ```bash
-git clone <your-repo-url>
+git clone git@github.com:kozlovzv/incident2SQL-RAG.git
 cd text2SQL-RAG
 ```
 
@@ -49,15 +49,23 @@ uvicorn src.api.main:app --reload
 ```bash
 curl -X POST "http://localhost:8000/query" \
      -H "Content-Type: application/json" \
-     -d '{"text": "Покажи критичные инциденты за последний месяц"}'
+     -d '{"text": "Show high risk incidents"}'
 ```
 
 Пример ответа:
 ```json
 {
-    "sql_query": "SELECT i.*, c.name as category_name FROM incidents i LEFT JOIN categories c ON i.category_id = c.id WHERE risk_level >= 0.8 AND date_occurred >= date('now', '-1 month') ORDER BY risk_level DESC LIMIT 10",
-    "results": [...],
-    "context": [...]
+    "status": "success",
+    "data": {
+        "query": "Show high risk incidents",
+        "sql": "SELECT i.*, c.name as category_name, c.description as category_description FROM incidents i LEFT JOIN categories c ON i.category_id = c.id WHERE risk_level >= 0.8 ORDER BY risk_level DESC LIMIT 10",
+        "results": [...],
+        "context": []
+    },
+    "metadata": {
+        "total_results": 10,
+        "execution_time": 0.001
+    }
 }
 ```
 
@@ -112,22 +120,144 @@ curl http://localhost:8000/health
 
 ### Запуск тестов
 ```bash
-# Все тесты
-pytest tests/ -v
+# Все тесты (27 тестов)
+pytest
 
 # Конкретные модули
-pytest tests/api/test_main.py
-pytest tests/models/test_text2sql.py
-pytest tests/rag/test_retriever.py
+pytest tests/api/test_main.py          # API endpoint тесты
+pytest tests/models/test_text2sql.py   # Text2SQL генератор
+pytest tests/models/test_complex_queries.py  # Сложные SQL запросы
+pytest tests/rag/test_retriever.py     # RAG функциональность
 ```
 
 ### Покрытие тестами
-- API endpoints и маршрутизация
-- Генерация SQL-запросов
-- RAG функциональность
-- Обработка сложных условий
-- Защита от SQL-инъекций
+- API endpoints и маршрутизация:
+  - Health check endpoint
+  - Query endpoint с валидацией структуры ответа
+  - Обработка ошибок и edge cases
+- Генерация SQL-запросов:
+  - Базовые запросы
+  - Сложные условия фильтрации
+  - Сортировка и лимиты
+- RAG функциональность:
+  - Индексация документов
+  - Поиск релевантного контекста
+  - Оптимизация результатов
 - Мониторинг производительности
+  - Замер времени выполнения
+  - Подсчет результатов
+  - Метаданные запросов
+
+## Локальная разработка
+
+### 1. Подготовка окружения
+```bash
+# Клонируем репозиторий
+git clone git@github.com:kozlovzv/incident2SQL-RAG.git
+cd text2SQL-RAG
+
+# Создаем и активируем виртуальное окружение
+python -m venv venv
+source venv/bin/activate  # На Windows: venv\Scripts\activate
+
+# Устанавливаем зависимости
+pip install -r requirements.txt
+```
+
+### 2. Запуск сервера
+```bash
+# Запускаем сервер с автоперезагрузкой
+uvicorn src.api.main:app --reload
+
+# Сервер запустится на http://localhost:8000
+```
+
+### 3. Проверка работоспособности
+
+#### Проверка статуса сервера
+```bash
+curl http://localhost:8000/health
+```
+
+Ожидаемый ответ:
+```json
+{
+    "status": "healthy",
+    "components": {
+        "database": "ready",
+        "text2sql": "ready",
+        "retriever": "ready"
+    }
+}
+```
+
+#### Тестовые запросы
+
+1. Базовый запрос инцидентов с высоким риском:
+```bash
+curl -X POST "http://localhost:8000/query" \
+     -H "Content-Type: application/json" \
+     -d '{"text": "Show high risk incidents"}' \
+     -s | python -m json.tool
+```
+
+2. Запрос инцидентов за последнюю неделю:
+```bash
+curl -X POST "http://localhost:8000/query" \
+     -H "Content-Type: application/json" \
+     -d '{"text": "Show incidents from last week"}' \
+     -s | python -m json.tool
+```
+
+3. Запрос критических инцидентов определенной категории:
+```bash
+curl -X POST "http://localhost:8000/query" \
+     -H "Content-Type: application/json" \
+     -d '{"text": "Show critical server crash incidents"}' \
+     -s | python -m json.tool
+```
+
+### 4. Проверка результатов
+
+Каждый запрос возвращает JSON со следующей структурой:
+```json
+{
+    "status": "success",
+    "data": {
+        "query": "исходный запрос",
+        "sql": "сгенерированный SQL-запрос",
+        "results": [
+            {
+                "id": "номер инцидента",
+                "title": "название",
+                "description": "описание",
+                "date_occurred": "дата",
+                "risk_level": "уровень риска",
+                "status": "статус",
+                "category_name": "название категории",
+                "category_description": "описание категории"
+            }
+        ],
+        "context": []
+    },
+    "metadata": {
+        "total_results": "количество результатов",
+        "execution_time": "время выполнения в секундах"
+    }
+}
+```
+
+### 5. Запуск тестов
+```bash
+# Все тесты (27 тестов)
+pytest
+
+# Конкретные модули
+pytest tests/api/test_main.py          # API endpoint тесты
+pytest tests/models/test_text2sql.py   # Text2SQL генератор
+pytest tests/models/test_complex_queries.py  # Сложные SQL запросы
+pytest tests/rag/test_retriever.py     # RAG функциональность
+```
 
 ## Contributing
 

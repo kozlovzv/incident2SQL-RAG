@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from sqlalchemy import text
@@ -9,6 +10,7 @@ from src.rag.retriever import RAGRetriever
 from src.models.text2sql import Text2SQLGenerator
 from src.models.database import init_db
 import logging
+import time
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -28,9 +30,15 @@ class Query(BaseModel):
 
 
 class SQLResponse(BaseModel):
-    sql_query: str
+    """Response model with improved readability"""
+
+    query: str
+    sql: str
+    results: List[Dict[str, Any]]
+    execution_time: float
+    total_results: int
     context: Optional[List[Dict[str, Any]]] = None
-    results: Optional[List[Dict[str, Any]]] = None
+    error: Optional[str] = None
 
 
 app = FastAPI(
@@ -84,31 +92,33 @@ def get_db():
         db.close()
 
 
-@app.post(
-    "/query",
-    response_model=SQLResponse,
-    description="Convert natural language query to SQL and execute it",
-)
+@app.post("/query")
 async def process_query(query: Query, db: Session = Depends(get_db)):
-    """
-    Convert a natural language query to SQL, retrieve relevant context, and execute the query.
-    The system will:
-    1. Find relevant incident descriptions to provide context
-    2. Generate an SQL query using the context and schema information
-    3. Execute the query and return results
-    """
+    start_time = time.time()
+
     try:
         logger.info(f"Processing query: {query.text}")
 
-        # Validate components are initialized
         if not hasattr(app.state, "components_ready") or not app.state.components_ready:
-            raise HTTPException(
-                status_code=503, detail="Service components not fully initialized"
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "error",
+                    "message": "Service components not fully initialized",
+                    "query": query.text,
+                    "execution_time": round(time.time() - start_time, 3),
+                },
             )
 
         if not text2sql or not retriever:
-            raise HTTPException(
-                status_code=503, detail="Required components not initialized"
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "error",
+                    "message": "Required components not initialized",
+                    "query": query.text,
+                    "execution_time": round(time.time() - start_time, 3),
+                },
             )
 
         # Get relevant context
@@ -120,27 +130,60 @@ async def process_query(query: Query, db: Session = Depends(get_db)):
             sql = text2sql.generate_sql(query.text, context)
             logger.info(f"Generated SQL: {sql}")
         except ValueError as e:
-            logger.error(f"SQL Generation error: {str(e)}")
-            raise HTTPException(status_code=400, detail=str(e))
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "message": str(e),
+                    "query": query.text,
+                    "execution_time": round(time.time() - start_time, 3),
+                },
+            )
 
         # Execute query with error handling
         try:
             result = db.execute(text(sql))
             rows = [dict(row._mapping) for row in result]
             logger.info(f"Query returned {len(rows)} results")
-        except SQLAlchemyError as e:
-            logger.error(f"Database error: {str(e)}")
-            raise HTTPException(
-                status_code=500, detail="Database query execution failed"
+
+            return JSONResponse(
+                content={
+                    "status": "success",
+                    "data": {
+                        "query": query.text,
+                        "sql": sql,
+                        "results": rows,
+                        "context": context,
+                    },
+                    "metadata": {
+                        "total_results": len(rows),
+                        "execution_time": round(time.time() - start_time, 3),
+                    },
+                }
             )
 
-        return SQLResponse(sql_query=sql, context=context, results=rows)
+        except SQLAlchemyError as e:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "error",
+                    "message": "Database query execution failed",
+                    "query": query.text,
+                    "execution_time": round(time.time() - start_time, 3),
+                },
+            )
 
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error processing query: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": "Internal server error",
+                "query": query.text,
+                "execution_time": round(time.time() - start_time, 3),
+            },
+        )
 
 
 @app.get("/health")

@@ -29,6 +29,7 @@ class RAGRetriever:
         index_path: str = None,
         cache_size: int = 1000,  # Size of LRU cache
         n_clusters: int = 100,  # Number of clusters for IVF index
+        force_ivf: bool = False,  # Force using IVF index even for small datasets
     ):
         self.model = SentenceTransformer(model_name)
         self.documents: List[Document] = []
@@ -40,7 +41,7 @@ class RAGRetriever:
         self.cache = {}  # Simple LRU cache for embeddings
         self.cache_size = cache_size
         self.n_clusters = n_clusters
-
+        self.force_ivf = force_ivf
         if self.index_path:
             # Check if index files exist
             faiss_path, meta_path = self._get_index_paths()
@@ -106,7 +107,6 @@ class RAGRetriever:
         if not documents:
             print("No documents provided for indexing")
             return False
-
         try:
             print(f"Creating index for {len(documents)} documents")
             embeddings = self._get_embeddings([doc.content for doc in documents])
@@ -115,35 +115,39 @@ class RAGRetriever:
 
             dimension = embeddings.shape[1]
 
-            # Create IVF index with clustering
-            quantizer = faiss.IndexFlatL2(dimension)
-            n_clusters = min(
-                self.n_clusters, len(documents)
-            )  # Adjust clusters based on data size
-            self.index = faiss.IndexIVFFlat(
-                quantizer, dimension, n_clusters, faiss.METRIC_L2
-            )
+            # Используем IVF индекс если принудительно включен или датасет большой
+            if self.force_ivf or len(documents) >= 50:
+                # Create IVF index with clustering
+                quantizer = faiss.IndexFlatL2(dimension)
+                n_clusters = min(
+                    self.n_clusters, len(documents)
+                )  # Adjust clusters based on data size
+                self.index = faiss.IndexIVFFlat(
+                    quantizer, dimension, n_clusters, faiss.METRIC_L2
+                )
+                # Train the index
+                print("Training IVF index...")
+                self.index.train(embeddings)
+                # Add vectors to the index
+                self.index.add(embeddings)
+                # Set number of probes for better recall
+                self.index.nprobe = min(20, n_clusters)
+                print(f"Successfully created IVF index with {n_clusters} clusters")
+            else:
+                # Для маленьких наборов данных используем простой IndexFlatL2
+                self.index = faiss.IndexFlatL2(dimension)
+                self.index.add(embeddings)
+                print("Created simple FlatL2 index for small dataset")
 
-            # Train the index
-            print("Training IVF index...")
-            self.index.train(embeddings)
-
-            # Add vectors to the index
-            self.index.add(embeddings)
-
-            # Set number of probes for better recall
-            self.index.nprobe = min(20, n_clusters)  # Balance between speed and recall
-
-            print(f"Successfully created IVF index with {n_clusters} clusters")
             return True
         except Exception as e:
             print(f"Error creating index: {e}")
             return False
 
     def _validate_index(self) -> bool:
-        """Validate index state with special handling for small datasets"""
+        """Validate index state"""
         try:
-            if not isinstance(self.index, faiss.Index):
+            if not isinstance(self.index, (faiss.IndexFlatL2, faiss.IndexIVFFlat)):
                 print("Not a valid FAISS index")
                 return False
 
@@ -151,16 +155,18 @@ class RAGRetriever:
                 print("No documents loaded")
                 return False
 
-            # For small datasets, we don't enforce training check
-            if len(self.documents) < 10:
-                return True
-
-            if not self.index.is_trained:
-                print("Index is not trained")
+            if self.index.ntotal != len(self.documents):
+                print(
+                    f"Index size mismatch: expected {len(self.documents)}, got {self.index.ntotal}"
+                )
                 return False
 
-            if self.index.ntotal == 0:
-                print("Index contains no vectors")
+            # Проверяем работоспособность индекса
+            test_vector = np.zeros((1, self.index.d), dtype="float32")
+            try:
+                self.index.search(test_vector, 1)
+            except Exception as e:
+                print(f"Index search test failed: {e}")
                 return False
 
             return True
@@ -261,29 +267,25 @@ class RAGRetriever:
         if not self.index_path or not self._validate_index():
             print("Cannot save index: missing required data or invalid index")
             return False
-
         try:
             print("Saving index to disk...")
             self.index_path.parent.mkdir(parents=True, exist_ok=True)
-
             faiss_path, meta_path = self._get_index_paths()
             temp_faiss = faiss_path.with_suffix(".faiss.tmp")
             temp_meta = meta_path.with_suffix(".meta.tmp")
-
-            # Ensure index is in a valid state before saving
-            if not self.index.is_trained or self.index.ntotal == 0:
-                print("Cannot save untrained or empty index")
-                return False
 
             # Save FAISS index
             print("Saving FAISS index to temporary file")
             faiss.write_index(self.index, str(temp_faiss))
 
-            # Save metadata
+            # Save metadata with index type information
             print("Saving metadata with versioning")
             meta_data = {
                 "version": "2.0",
                 "last_updated": datetime.utcnow().isoformat(),
+                "index_type": "flat_l2"
+                if isinstance(self.index, faiss.IndexFlatL2)
+                else "ivf",
                 "documents": [
                     {
                         "content": doc.content,
@@ -296,13 +298,16 @@ class RAGRetriever:
                     "similarity_threshold": self.similarity_threshold,
                     "chunk_size": self.chunk_size,
                     "n_clusters": self.n_clusters,
+                    "force_ivf": self.force_ivf,
                     "model_name": self.model.__class__.__name__,
                 },
                 "stats": {
                     "total_documents": len(self.documents),
                     "index_size": temp_faiss.stat().st_size,
                     "dimension": self.index.d,
-                    "is_trained": self.index.is_trained,
+                    "is_trained": getattr(
+                        self.index, "is_trained", True
+                    ),  # True for FlatL2
                     "ntotal": self.index.ntotal,
                 },
             }
@@ -313,7 +318,6 @@ class RAGRetriever:
             # Atomic rename
             temp_faiss.rename(faiss_path)
             temp_meta.rename(meta_path)
-
             print("Successfully saved index and metadata")
             return True
 
@@ -329,14 +333,12 @@ class RAGRetriever:
             return False
 
     def load_index(self) -> bool:
-        """Enhanced index loading with better validation"""
+        """Enhanced index loading with better validation and fallback"""
         if not self.index_path:
             print("No index path provided")
             return False
-
         try:
             faiss_path, meta_path = self._get_index_paths()
-
             if not faiss_path.exists() or not meta_path.exists():
                 print("Missing required index files")
                 return False
@@ -346,78 +348,63 @@ class RAGRetriever:
             with open(meta_path, "rb") as f:
                 meta_data = pickle.load(f)
 
-            # Load documents
-            docs_data = meta_data.get("documents", [])
-            if not docs_data:
-                print("No documents found in metadata")
-                return False
+            # Version compatibility check with warning
+            version = meta_data.get("version", "1.0")
+            if version != "2.0":
+                print(f"Warning: Loading index with version {version}")
 
-            # Load configuration first
+            # Load configuration
             config = meta_data.get("config", {})
             self.similarity_threshold = config.get(
                 "similarity_threshold", self.similarity_threshold
             )
             self.chunk_size = config.get("chunk_size", self.chunk_size)
             self.n_clusters = config.get("n_clusters", self.n_clusters)
+            self.force_ivf = config.get("force_ivf", self.force_ivf)
 
-            # Load FAISS index
-            print(f"Loading FAISS index from {faiss_path}")
-            self.index = faiss.read_index(str(faiss_path))
-
-            # Ensure index is ready for search
-            if isinstance(self.index, faiss.IndexIVFFlat):
-                self.index.nprobe = min(20, self.n_clusters)
-                if not self.index.is_trained:
-                    print("Warning: Loading untrained index")
-                    return False
-
-            # Only set documents if index is valid
-            if self._validate_index():
-                self.documents = [
-                    Document(content=doc["content"], metadata=doc.get("metadata", {}))
-                    for doc in docs_data
-                ]
-                print(f"Successfully loaded index with {len(self.documents)} documents")
-                return True
-            else:
-                print("Failed to validate loaded index")
-                self.index = None
+            # Load documents
+            docs_data = meta_data.get("documents", [])
+            if not docs_data:
+                print("No documents found in metadata")
                 return False
+
+            # Convert document data to Document objects
+            self.documents = [
+                Document(content=doc["content"], metadata=doc.get("metadata", {}))
+                for doc in docs_data
+            ]
+
+            # Try to load existing index
+            try:
+                print(f"Loading FAISS index from {faiss_path}")
+                self.index = faiss.read_index(str(faiss_path))
+
+                # Validate loaded index
+                if self._validate_index():
+                    print(
+                        f"Successfully loaded index with {len(self.documents)} documents"
+                    )
+                    return True
+                else:
+                    print("Loaded index validation failed, recreating index...")
+            except Exception as e:
+                print(f"Error loading index, recreating: {e}")
+
+            # Fallback: recreate index from documents
+            print("Recreating index from saved documents")
+            if self._create_index(self.documents):
+                print("Successfully recreated index")
+                return True
+
+            print("Failed to recreate index")
+            self.index = None
+            self.documents = []
+            return False
 
         except Exception as e:
             print(f"Error loading index: {e}")
             self.documents = []
             self.index = None
-            return False
-
-    def _validate_loaded_index(self, meta_data: Dict) -> bool:
-        """Validate loaded index with relaxed requirements for small datasets"""
-        try:
-            expected_dim = meta_data.get("stats", {}).get("dimension")
-            if expected_dim and self.index.d != expected_dim:
-                print(
-                    f"Dimension mismatch: expected {expected_dim}, got {self.index.d}"
-                )
-                return False
-
-            expected_docs = meta_data.get("stats", {}).get("total_documents")
-            if expected_docs and self.index.ntotal != expected_docs:
-                print(
-                    f"Document count mismatch: expected {expected_docs}, got {self.index.ntotal}"
-                )
-                return False
-
-            # For small datasets, skip additional validation
-            if expected_docs and expected_docs < 10:
-                return True
-
-            # Test search functionality for larger datasets
-            test_vector = np.zeros((1, self.index.d), dtype="float32")
-            self.index.search(test_vector, 1)
-
-            return True
-        except Exception as e:
-            print(f"Error validating index: {e}")
             return False
 
     def update_index(self, new_documents: List[Dict[str, Any]]) -> bool:
