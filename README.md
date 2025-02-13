@@ -126,3 +126,60 @@ isort src/ tests/
 ## Лицензия
 
 MIT
+
+## Тестирование системы
+
+### Автоматические тесты
+```bash
+# Запуск всех тестов с подробным выводом
+pytest tests/ -v
+
+# Запуск конкретных тестов
+pytest tests/api/test_main.py
+pytest tests/models/test_text2sql.py
+pytest tests/models/test_complex_queries.py
+pytest tests/rag/test_retriever.py
+```
+
+### Тестирование через консоль
+
+1. Запустите demo-скрипт для проверки основной функциональности:
+```bash
+python src/run_demo.py
+```
+
+2. Тестирование через API:
+
+Сначала запустите сервер:
+```bash
+uvicorn src.api.main:app --reload
+```
+
+Затем выполните тестовые запросы:
+```bash
+# Проверка работоспособности сервера
+curl http://localhost:8000/health
+
+# Тестовые запросы (с форматированным выводом)
+curl -X POST "http://localhost:8000/query" \
+     -H "Content-Type: application/json" \
+     -d '{"text": "Show critical incidents from last month with high risk"}' \
+     | python -m json.tool
+
+# Запрос на русском языке
+curl -X POST "http://localhost:8000/query" \
+     -H "Content-Type: application/json" \
+     -d '{"text": "Покажи критичные инциденты за последний месяц"}' \
+     | python -m json.tool
+```
+
+### Покрытие тестами
+
+Тесты охватывают следующие аспекты:
+- API endpoints (/health, /query)
+- Генерация SQL запросов
+- Обработка сложных условий (фильтрация, сортировка, лимиты)
+- Поддержка русского языка
+- Защита от SQL-инъекций
+- RAG функциональность (индексация и поиск документов)
+- Работу с базой данных

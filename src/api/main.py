@@ -1,14 +1,13 @@
 from fastapi import FastAPI, HTTPException, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, Session
-import os
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session, sessionmaker
 from pathlib import Path
 from src.rag.retriever import RAGRetriever
 from src.models.text2sql import Text2SQLGenerator
 from src.models.database import init_db
-from src.models.init_data import init_sample_data
 import logging
 
 # Set up logging
