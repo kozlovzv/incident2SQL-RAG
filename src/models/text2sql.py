@@ -21,6 +21,12 @@ class Text2SQLGenerator:
             },
         }
 
+        self.date_patterns = {
+            "count": ["количество", "число", "сколько", "count", "number of"],
+            "grouping": ["по дням", "за день", "в день", "per day", "by day"],
+            "max": ["больше всего", "максимальное", "наибольшее", "maximum", "most"],
+        }
+
     def _clean_sql(self, sql: str) -> str:
         """Validate and clean SQL query"""
         # Basic SQL injection prevention
@@ -46,11 +52,60 @@ class Text2SQLGenerator:
         if not query:
             raise ValueError("Query cannot be empty")
 
-        # SQL injection check
-        if any(char in query for char in [";", "--", "/*", "*/"]):
-            raise ValueError("SQL injection attempt detected")
-
         try:
+            query_lower = query.lower()
+
+            # Check if this is a request for all records without limit
+            no_limit = any(
+                phrase in query_lower
+                for phrase in [
+                    "без ограничений",
+                    "все инциденты",
+                    "without limit",
+                    "all incidents",
+                ]
+            )
+
+            # Check if this is an aggregation query
+            is_count_query = any(
+                word in query_lower for word in self.date_patterns["count"]
+            )
+            is_group_by_day = any(
+                word in query_lower for word in self.date_patterns["grouping"]
+            )
+            is_max_count = any(
+                word in query_lower for word in self.date_patterns["max"]
+            )
+
+            if is_count_query or is_group_by_day or is_max_count:
+                # Build aggregation query
+                base_sql = """
+                    WITH daily_counts AS (
+                        SELECT 
+                            date(date_occurred) as incident_date,
+                            COUNT(*) as incident_count
+                        FROM incidents i
+                        GROUP BY date(date_occurred)
+                    )
+                """
+
+                if is_max_count:
+                    base_sql += """
+                        SELECT incident_date, incident_count
+                        FROM daily_counts
+                        ORDER BY incident_count DESC, incident_date DESC
+                        LIMIT 1
+                    """
+                else:
+                    base_sql += """
+                        SELECT incident_date, incident_count
+                        FROM daily_counts
+                        ORDER BY incident_date DESC
+                    """
+
+                return base_sql.strip()
+
+            # Regular query processing
             base_sql = "SELECT i.*, c.name as category_name, c.description as category_description "
             base_sql += "FROM incidents i LEFT JOIN categories c ON i.category_id = c.id WHERE 1=1"
 
@@ -105,11 +160,10 @@ class Text2SQLGenerator:
             if "server crash" in query_lower:
                 conditions.append("c.name = 'Server Crash'")
 
-            # Time period processing (non-quarter)
-            if "last month" in query_lower or "последний месяц" in query_lower:
-                conditions.append("i.date_occurred >= date('now', '-1 month')")
-            elif "last week" in query_lower or "последняя неделя" in query_lower:
-                conditions.append("i.date_occurred >= date('now', '-7 days')")
+            # Time period processing
+            time_condition = self._process_time_period(query)
+            if time_condition:
+                conditions.append(time_condition)
 
             # Sorting
             sort_type = None
@@ -166,16 +220,19 @@ class Text2SQLGenerator:
             else:
                 base_sql += " ORDER BY i.risk_level DESC"
 
-            # Limit (with fallback)
-            limit = 10
-            try:
-                limit_match = re.search(r"(\d+).*?(?:инцидент|incident)", query_lower)
-                if limit_match:
-                    limit = int(limit_match.group(1))
-            except (AttributeError, ValueError):
-                pass
-
-            base_sql += f" LIMIT {limit}"
+            # Apply limit only if not explicitly requested to show all
+            if not no_limit:
+                # Limit (with fallback)
+                limit = 10
+                try:
+                    limit_match = re.search(
+                        r"(\d+).*?(?:инцидент|incident)", query_lower
+                    )
+                    if limit_match:
+                        limit = int(limit_match.group(1))
+                except (AttributeError, ValueError):
+                    pass
+                base_sql += f" LIMIT {limit}"
 
             return base_sql.strip()
         except Exception as e:
@@ -198,10 +255,49 @@ class Text2SQLGenerator:
 
     def _process_time_period(self, query: str) -> Optional[str]:
         """Process time period conditions"""
-        if "last month" in query or "последний месяц" in query:
-            return "i.date_occurred >= date('now', '-1 month')"
-        elif "last week" in query or "последняя неделя" in query:
+        query_lower = query.lower()
+
+        # Time period keywords
+        month_keywords = ["last month", "последний месяц", "прошлый месяц", "за месяц"]
+        week_keywords = [
+            "last week",
+            "последняя неделя",
+            "прошлая неделя",
+            "за неделю",
+            "последнюю неделю",
+        ]
+
+        # Check for specific date (format: DD month YYYY)
+        date_pattern = r"(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+(\d{4})"
+        date_match = re.search(date_pattern, query_lower)
+        if date_match:
+            month_mapping = {
+                "января": "01",
+                "февраля": "02",
+                "марта": "03",
+                "апреля": "04",
+                "мая": "05",
+                "июня": "06",
+                "июля": "07",
+                "августа": "08",
+                "сентября": "09",
+                "октября": "10",
+                "ноября": "11",
+                "декабря": "12",
+            }
+            day = date_match.group(1).zfill(2)
+            month = month_mapping[date_match.group(2)]
+            year = date_match.group(3)
+            return f"date(i.date_occurred) = '{year}-{month}-{day}'"
+
+        # Check for week period
+        if any(keyword in query_lower for keyword in week_keywords):
             return "i.date_occurred >= date('now', '-7 days')"
+
+        # Check for month period
+        if any(keyword in query_lower for keyword in month_keywords):
+            return "i.date_occurred >= date('now', '-1 month')"
+
         return None
 
     def _process_sorting(self, query: str) -> List[str]:
